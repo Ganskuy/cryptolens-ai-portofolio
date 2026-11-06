@@ -1,0 +1,46 @@
+# Local TLS production rehearsal. No public hostname or interface binding.
+services:
+  backend:
+    ports: !reset []
+    environment: &secure
+      AUTH_MODE: required
+      COOKIE_SECURE: "true"
+      DEPLOYMENT_MODE: production
+      ALLOWED_ORIGIN: https://localhost:8443
+      MARKET_WS_URL: /api/v1/stream/market
+      AI_MODE: grounded
+  ingestion-worker:
+    environment: *secure
+  frontend:
+    ports: !reset []
+  backend-green:
+    profiles: [rollout]
+    build: ./backend
+    env_file: .env
+    environment: *secure
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/ready')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  gateway:
+    image: caddy:2-alpine@sha256:eb4d35b7452d1ab6171fbdbe8d9275b2301dad6dad92115d91e19fb9b24d510f
+    ports: [127.0.0.1:8443:8443]
+    volumes:
+      - ./.local/caddy:/etc/caddy:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      backend: {condition: service_healthy}
+      frontend: {condition: service_healthy}
+    restart: unless-stopped
+    mem_limit: 128m
+volumes:
+  caddy_data:
+  caddy_config:

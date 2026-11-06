@@ -1,0 +1,95 @@
+name: Verify CryptoLens
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: backend/requirements.lock
+      - run: pip install -r backend/requirements.lock
+      - working-directory: backend
+        run: |
+          ruff check .
+          ruff format --check .
+          mypy app
+          pytest -q
+          pip-audit -r requirements.lock
+          pip-audit -r requirements.runtime.lock
+      - run: python scripts/security_scan.py
+      - run: docker build -t cryptolens-backend ./backend
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - working-directory: frontend
+        run: |
+          npm ci
+          npm run lint
+          npm run build
+          npm run typecheck
+          npm run test
+          npm audit --audit-level=high
+      - run: docker build -t cryptolens-frontend ./frontend
+  integrated:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: |
+          cp .env.example .env
+          sed -i 's/DATA_MODE=live/DATA_MODE=fixture/' .env
+          docker compose up -d --build
+          timeout 180 bash -c 'until curl -fsS http://localhost:3100 >/dev/null; do sleep 3; done'
+          docker compose exec -T backend alembic check
+      - working-directory: frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npm run e2e
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install -r backend/requirements.runtime.lock
+      - name: Local TLS accounts and recovery
+        run: |
+          python scripts/prepare_verification.py
+          python scripts/deploy.py start --overlay .local/verify.yml
+          docker compose exec -T backend python -c 'from app.worker import fixtures; fixtures()'
+          python scripts/prepare_verification.py --accounts
+          python scripts/verify_local.py
+          docker compose stop ingestion-worker
+          docker compose exec -T backend python - < scripts/verify_leadership.py
+          python scripts/deploy.py candidate --overlay .local/verify.yml
+          python scripts/deploy.py promote --overlay .local/verify.yml
+          curl --cacert .local/caddy-root.crt -fsS https://localhost:8443/api/v1/health/ready
+          python scripts/deploy.py rollback --overlay .local/verify.yml
+          python scripts/recovery_drill.py
+      - working-directory: frontend
+        env:
+          CRYPTOLENS_BASE_URL: https://localhost:8443
+          CRYPTOLENS_TEST_CREDENTIALS: ${{ github.workspace }}/.local/accounts.json
+        run: npm run e2e
+      - if: failure()
+        run: docker compose logs --tail 80
+      - if: always()
+        run: docker compose -f docker-compose.yml -f compose.local-tls.yml --profile rollout down
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.24.2 detect --source=/repo --redact --no-banner

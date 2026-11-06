@@ -1,0 +1,17 @@
+fastapi>=0.115
+uvicorn[standard]>=0.34
+pydantic-settings>=2.8
+httpx>=0.28
+sqlalchemy>=2.0
+psycopg[binary]>=3.2
+alembic>=1.15
+redis>=5
+numpy>=2.2
+polars>=1.25
+websockets>=15
+pytest>=8
+pytest-asyncio>=0.25
+ruff>=0.11
+mypy>=1.15
+pip-audit>=2.8
+prometheus-client>=0.20
